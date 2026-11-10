@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: transit
+          POSTGRES_PASSWORD: transit
+          POSTGRES_DB: transit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U transit -d transit_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_USER: transit
+      POSTGRES_PASSWORD: transit
+      POSTGRES_DB: transit_test
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        run: pip install uv==0.13.6
+      - name: Install dependencies (exactly as locked)
+        run: uv sync --frozen
+      - name: Load frozen fixture into the test database
+        run: uv run python -m app.evals.load_fixture
+      - name: Unit + integration tests
+        run: uv run pytest -v
+      - name: Eval harness self-check (oracle, no LLM, free)
+        run: uv run python -m app.evals.run_eval --oracle

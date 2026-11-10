@@ -17,6 +17,9 @@ node_modules/
 # Raw downloaded or generated data
 data/
 
+# Eval run outputs (fixtures and cases.json ARE committed)
+eval/results/
+
 # Editor / OS
 .idea/
 Thumbs.db

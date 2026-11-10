@@ -1,0 +1,79 @@
+name: agent-eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: "Number of cases to run (0 = all 100)"
+        required: false
+        default: "0"
+  pull_request:
+    paths:
+      - "backend/app/agent.py"
+      - "backend/app/api.py"
+      - "backend/app/transit_db.py"
+      - "backend/app/evals/**"
+      - "eval/**"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: transit
+          POSTGRES_PASSWORD: transit
+          POSTGRES_DB: transit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U transit -d transit_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_USER: transit
+      POSTGRES_PASSWORD: transit
+      POSTGRES_DB: transit_test
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      API_BASE_URL: http://localhost:8010
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LLM_MODEL: claude-sonnet-5-5
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the API key secret exists
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::Add ANTHROPIC_API_KEY under Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        run: pip install uv==0.13.6
+      - name: Install dependencies (exactly as locked)
+        run: uv sync --frozen
+      - name: Load frozen fixture into the test database
+        run: uv run python -m app.evals.load_fixture
+      - name: Start the API with the frozen clock
+        run: |
+          FIXED_NOW=$(python -c "import json;print(json.load(open('../eval/fixtures/fixture.json'))['fixed_now'])")
+          echo "FIXED_NOW=$FIXED_NOW" >> "$GITHUB_ENV"
+          FIXED_NOW=$FIXED_NOW nohup uv run uvicorn app.api:app --port 8010 > api.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs http://localhost:8010/health && exit 0; sleep 1; done
+          cat api.log; exit 1
+      - name: Run agent eval (PRs run 15 cases; manual runs default to all)
+        run: uv run python -m app.evals.run_eval --sample "${{ github.event.inputs.sample || '15' }}"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eval-results
+          path: eval/results/

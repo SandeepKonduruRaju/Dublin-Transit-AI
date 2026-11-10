@@ -15,5 +15,58 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+  rt-poller:
+    build: ./backend
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      NTA_API_KEY: ${NTA_API_KEY}
+      RT_POLL_INTERVAL_SECONDS: ${RT_POLL_INTERVAL_SECONDS:-60}
+      RT_RETENTION_DAYS: ${RT_RETENTION_DAYS:-8}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  agent:
+    build: ./backend
+    command: ["uvicorn", "app.agent_api:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      API_BASE_URL: http://api:8000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-5-5}
+    ports:
+      - "8001:8001"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 volumes:
   pgdata:

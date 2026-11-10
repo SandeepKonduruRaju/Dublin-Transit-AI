@@ -1,0 +1,22 @@
+{
+  "fixed_now": "2026-11-02T16:25:37+00:00",
+  "sample_stop_id": "8230DB006282",
+  "fixture_day": "2026-11-02",
+  "routes": [
+    "15",
+    "39A",
+    "E1"
+  ],
+  "static_feed_version": "FIXTURE-DE0E4D53-0CE1-4949-9B89-4A2C0FCCA740",
+  "snapshots": [
+    "20261102T162307Z.pb",
+    "20261102T162400Z.pb",
+    "20261102T162507Z.pb"
+  ],
+  "counts": {
+    "routes": 402,
+    "trips": 1174,
+    "stop_times": 87999,
+    "stops": 428
+  }
+}
