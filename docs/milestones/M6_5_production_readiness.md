@@ -1317,6 +1317,7 @@ docker compose exec db psql -U transit -d transit -c "DROP TABLE rt_stop_time_up
 - **Backfill** the daily summary from the old tables before dropping them, if you want older history
 - Have `answer()` return the number of model calls, for cost per eval run
 - **Route delays can double-count a trip reported on two service days** (`route_delays` groups by trip and service day)
+- **Index bloat on `rt_stop_delays`** (measured 17 Nov: 240 MB of indexes vs 61 MB heap): every upsert changes the indexed `feed_timestamp`, so no HOT updates. Fix: drop `idx_rt_stop_delays_feed_ts`, set `fillfactor=70` on `rt_stop_delays`, verify `/delays` with `EXPLAIN ANALYZE`
 
 ---
 
