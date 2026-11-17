@@ -25,7 +25,10 @@ $sshArgs = @("-o", "StrictHostKeyChecking=accept-new")
 if ($KeyPath) { $sshArgs += @("-i", $KeyPath) }
 
 function Invoke-Native([string] $exe, [string[]] $arguments) {
-    & $exe @arguments
+    # Windows PowerShell 5.1 turns any stderr line (e.g. docker's "Pulling" progress) into an error record,
+    # which "Stop" would make fatal. Judge native tools by their exit code instead.
+    $ErrorActionPreference = "Continue"
+    & $exe @arguments 2>&1 | ForEach-Object { "$_" }
     if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
 }
 

@@ -30,8 +30,9 @@ alias dc='docker compose -f docker-compose.yml -f docker-compose.prod.yml'
 1. **Server `.env`** (once). Copy your local `.env` without printing it, then add the hostname:
    ```powershell
    scp .env azureuser@${VM}:~/dublin-transit-ai/.env
-   ssh azureuser@$VM "echo SITE_HOST=$VM >> ~/dublin-transit-ai/.env && chmod 600 ~/dublin-transit-ai/.env"
+   ssh azureuser@$VM "cd ~/dublin-transit-ai && sed -i -e '`$a\' .env && echo SITE_HOST=$VM >> .env && chmod 600 .env"
    ```
+   The `sed` adds a final newline first; without it, `SITE_HOST` would be glued onto the last line of `.env`.
 2. **Stop the local poller** so only one poller uses the NTA key: `docker compose stop rt-poller`.
 3. **Deploy:** `.\deploy\deploy.ps1 -VmHost $VM`
 4. **Database**, on the VM: apply the migrations in order, then load the timetable (about 100 MB download;
