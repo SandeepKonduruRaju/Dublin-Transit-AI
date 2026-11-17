@@ -46,3 +46,24 @@ jobs:
         run: uv run pytest -v
       - name: Eval harness self-check (oracle, no LLM, free)
         run: uv run python -m app.evals.run_eval --oracle
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies (exactly as locked)
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Build (type-checks too)
+        run: npm run build

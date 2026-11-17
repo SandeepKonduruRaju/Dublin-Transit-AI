@@ -1,0 +1,64 @@
+# Production override (Milestone 8). Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Only Caddy is reachable from outside; every other service talks on the internal Compose network.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    ports: !reset []
+    restart: unless-stopped
+    logging: *logging
+
+  rt-poller:
+    restart: unless-stopped
+    logging: *logging
+
+  static-refresh:
+    restart: unless-stopped
+    logging: *logging
+
+  api:
+    ports: !reset []
+    restart: unless-stopped
+    logging: *logging
+
+  agent:
+    ports: !reset []
+    environment:
+      TRUST_PROXY_HEADERS: "true"      # Caddy sets X-Forwarded-For to the real client IP
+      CHAT_GLOBAL_PER_DAY: "200"       # tighter cap for launch
+    restart: unless-stopped
+    logging: *logging
+
+  web:
+    ports: !reset []
+    restart: unless-stopped
+    logging: *logging
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"                  # HTTP/3
+    environment:
+      SITE_HOST: ${SITE_HOST:?set SITE_HOST in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data               # certificates persist across restarts
+      - caddy_config:/config
+    depends_on:
+      - web
+      - agent
+      - api
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:

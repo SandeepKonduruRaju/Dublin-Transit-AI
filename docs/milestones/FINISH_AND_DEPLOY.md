@@ -190,6 +190,8 @@ Run from my laptop (paid `/chat` calls need my OK):
 | 7 | Reboot the VM (`az vm restart`) | everything comes back by itself in a few minutes |
 | 8 | Poller logs after 10 min | `Stored snapshot` and `Rollup` lines |
 | 9 | Static-refresh logs | `Next static refresh in X hours` |
+| 10 | 12 rapid `/chat` calls, each with a fake `X-Forwarded-For: 203.0.113.<n>` header | still 429 with `Retry-After`: the limiter keys on my real IP, not the spoofed header |
+| 11 | Realtime storage after 24 h of continuous polling | `rt_trips` + `rt_stop_delays` + `rt_route_daily` MB/day, measured (not estimated) |
 
 **STOP: final report**
 - **Live URL**

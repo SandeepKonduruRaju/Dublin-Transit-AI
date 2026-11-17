@@ -87,5 +87,16 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      args:
+        AGENT_URL: http://agent:8001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - agent
+    restart: unless-stopped
 volumes:
   pgdata:
