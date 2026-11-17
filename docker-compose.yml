@@ -25,7 +25,22 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       NTA_API_KEY: ${NTA_API_KEY}
       RT_POLL_INTERVAL_SECONDS: ${RT_POLL_INTERVAL_SECONDS:-60}
-      RT_RETENTION_DAYS: ${RT_RETENTION_DAYS:-8}
+      RT_RETENTION_DAYS: ${RT_RETENTION_DAYS:-2}
+      RT_SUMMARY_RETENTION_DAYS: ${RT_SUMMARY_RETENTION_DAYS:-90}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  static-refresh:
+    build: ./backend
+    command: ["python", "-m", "app.static_refresh", "--daily"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     depends_on:
       db:
         condition: service_healthy

@@ -85,6 +85,7 @@ def latest_snapshot(conn: psycopg.Connection) -> dict | None:
 
 # ---------- departures ----------
 
+# Window starts 30 min BEFORE now so late-running buses (scheduled earlier, still to come) are included.
 SCHEDULED_SQL = """
 WITH svc AS (
     SELECT unnest(%(today_svc)s::text[]) AS service_id, %(today)s::date AS service_date, 0 AS offset_s
@@ -98,27 +99,30 @@ JOIN trips t       ON t.service_id = svc.service_id
 JOIN stop_times st ON st.trip_id = t.trip_id
 JOIN routes r      ON r.route_id = t.route_id
 WHERE st.stop_id = %(stop_id)s
-  AND st.departure_secs >= %(now_s)s + svc.offset_s - 1800   -- 30 min back: late buses may still be coming
-  AND st.departure_secs <  %(now_s)s + svc.offset_s + %(window_s)s
+  AND st.departure_secs >= %(from_s)s + svc.offset_s
+  AND st.departure_secs <  %(to_s)s + svc.offset_s
   AND (%(route)s::text IS NULL OR r.route_short_name = %(route)s)
 ORDER BY st.departure_secs - svc.offset_s
-LIMIT %(limit)s
+LIMIT %(fetch)s
 """
 
-# Latest known delay for each trip at or before the requested stop (GTFS-RT delay propagation)
+# Current delay per (trip, service day) at or before the requested stop (GTFS-RT delay propagation),
+# using only rows reported in the LATEST snapshot.
 DELAYS_FOR_TRIPS_SQL = """
-SELECT DISTINCT ON (u.trip_id) u.trip_id, COALESCE(u.departure_delay, u.arrival_delay) AS delay_s
-FROM rt_stop_time_updates u
-JOIN unnest(%(trip_ids)s::text[], %(seqs)s::int[]) AS q(trip_id, seq) ON q.trip_id = u.trip_id
-WHERE u.snapshot_id = %(sid)s
-  AND u.stop_sequence <= q.seq
-  AND COALESCE(u.departure_delay, u.arrival_delay) IS NOT NULL
-ORDER BY u.trip_id, u.stop_sequence DESC
+SELECT DISTINCT ON (d.trip_id, d.start_date)
+       d.trip_id, d.start_date, COALESCE(d.departure_delay, d.arrival_delay) AS delay_s
+FROM rt_stop_delays d
+JOIN unnest(%(trip_ids)s::text[], %(dates)s::date[], %(seqs)s::int[]) AS q(trip_id, service_date, seq)
+  ON q.trip_id = d.trip_id AND q.service_date = d.start_date
+WHERE d.feed_timestamp = %(ts)s
+  AND d.stop_sequence <= q.seq
+  AND COALESCE(d.departure_delay, d.arrival_delay) IS NOT NULL
+ORDER BY d.trip_id, d.start_date, d.stop_sequence DESC
 """
 
 CANCELLED_SQL = """
-SELECT trip_id FROM rt_trip_updates
-WHERE snapshot_id = %(sid)s AND trip_id = ANY(%(trip_ids)s) AND schedule_relationship = 'CANCELED'
+SELECT trip_id, start_date FROM rt_trips
+WHERE feed_timestamp = %(ts)s AND trip_id = ANY(%(trip_ids)s) AND schedule_relationship = 'CANCELED'
 """
 
 
@@ -131,10 +135,13 @@ def departures(
     limit: int = 5,
     window_minutes: int = 120,
     stale_seconds: int = 300,
+    lookback_minutes: int = 30,
 ) -> dict:
+    """Next departures by EFFECTIVE time: expected (realtime) if known, else scheduled."""
     now_local = now.astimezone(tz)
     today = now_local.date()
     yday = today - timedelta(days=1)
+    now_s = seconds_since_midnight(now_local)
     rows = conn.execute(
         SCHEDULED_SQL,
         {
@@ -143,10 +150,10 @@ def departures(
             "today": today,
             "yday": yday,
             "stop_id": stop_id,
-            "now_s": seconds_since_midnight(now_local),
-            "window_s": window_minutes * 60,
+            "from_s": now_s - lookback_minutes * 60,
+            "to_s": now_s + window_minutes * 60,
             "route": route,
-            "limit": limit + 20,  # headroom: some rows are dropped below once delays are applied
+            "fetch": limit + 20,
         },
     ).fetchall()
 
@@ -154,31 +161,33 @@ def departures(
     realtime_age_s = int((now - snap["feed_timestamp"]).total_seconds()) if snap else None
     use_rt = snap is not None and realtime_age_s is not None and realtime_age_s <= stale_seconds
 
-    delays: dict[str, int] = {}
-    cancelled: set[str] = set()
+    delays: dict[tuple[str, date], int] = {}
+    cancelled: set[tuple[str, date]] = set()
     if use_rt and rows:
-        trip_ids = [r["trip_id"] for r in rows]
-        params = {"sid": snap["id"], "trip_ids": trip_ids, "seqs": [r["stop_sequence"] for r in rows]}
-        delays = {r["trip_id"]: r["delay_s"] for r in conn.execute(DELAYS_FOR_TRIPS_SQL, params).fetchall()}
-        cancelled = {r["trip_id"] for r in conn.execute(CANCELLED_SQL, params).fetchall()}
+        params = {
+            "ts": snap["feed_timestamp"],
+            "trip_ids": [r["trip_id"] for r in rows],
+            "dates": [r["service_date"] for r in rows],
+            "seqs": [r["stop_sequence"] for r in rows],
+        }
+        delays = {(r["trip_id"], r["start_date"]): r["delay_s"] for r in conn.execute(DELAYS_FOR_TRIPS_SQL, params).fetchall()}
+        cancelled = {(r["trip_id"], r["start_date"]) for r in conn.execute(CANCELLED_SQL, params).fetchall()}
 
-    # Effective time = expected if realtime, otherwise scheduled (cancelled trips use scheduled).
-    cutoff = now.replace(microsecond=0)
-    out = []
+    candidates = []
     for r in rows:
+        key = (r["trip_id"], r["service_date"])
         scheduled = service_datetime(r["service_date"], r["departure_secs"], tz)
-        delay = delays.get(r["trip_id"])
-        if r["trip_id"] in cancelled:
-            status = "cancelled"
-        elif delay is not None:
-            status = "realtime"
-        else:
-            status = "scheduled_only"
+        delay = delays.get(key)
         expected = scheduled + timedelta(seconds=delay) if delay is not None else None
-        effective = expected if status == "realtime" else scheduled
-        if effective < cutoff:
-            continue  # already gone
-        out.append((effective, {
+        if key in cancelled:
+            status, effective = "cancelled", scheduled
+        elif expected is not None:
+            status, effective = "realtime", expected
+        else:
+            status, effective = "scheduled_only", scheduled
+        if effective < now_local:
+            continue  # already gone (or a cancelled trip that was due before now)
+        candidates.append((effective, {
             "route": r["route_short_name"],
             "headsign": r["trip_headsign"],
             "trip_id": r["trip_id"],
@@ -187,40 +196,39 @@ def departures(
             "expected_time": expected.isoformat() if expected else None,
             "status": status,
         }))
-    out.sort(key=lambda pair: pair[0])
-    out = [dep for _, dep in out[:limit]]
+    candidates.sort(key=lambda c: c[0])
 
     return {
         "stop_id": stop_id,
         "now": now_local.isoformat(),
         "realtime": "fresh" if use_rt else ("stale" if snap else "none"),
         "realtime_age_seconds": realtime_age_s,
-        "departures": out,
+        "departures": [d for _, d in candidates[:limit]],
     }
 
 
 # ---------- current delays for a route ----------
 
 ROUTE_DELAYS_SQL = """
-SELECT DISTINCT ON (u.trip_id)
-       u.trip_id, t.trip_headsign, s.stop_name AS next_stop,
-       COALESCE(u.arrival_delay, u.departure_delay) AS delay_s
-FROM rt_stop_time_updates u
-JOIN trips t  ON t.trip_id = u.trip_id
+SELECT DISTINCT ON (d.trip_id, d.start_date)
+       d.trip_id, t.trip_headsign, s.stop_name AS next_stop,
+       COALESCE(d.arrival_delay, d.departure_delay) AS delay_s
+FROM rt_stop_delays d
+JOIN trips t  ON t.trip_id = d.trip_id
 JOIN routes r ON r.route_id = t.route_id
-LEFT JOIN stops s ON s.stop_id = u.stop_id
-WHERE u.snapshot_id = %(sid)s
+LEFT JOIN stops s ON s.stop_id = d.stop_id
+WHERE d.feed_timestamp = %(ts)s
   AND r.route_short_name = %(route)s
-  AND COALESCE(u.arrival_delay, u.departure_delay) IS NOT NULL
-ORDER BY u.trip_id, u.stop_sequence
+  AND COALESCE(d.arrival_delay, d.departure_delay) IS NOT NULL
+ORDER BY d.trip_id, d.start_date, d.stop_sequence
 """
 
 ROUTE_CANCELLED_SQL = """
 SELECT count(*) AS n
-FROM rt_trip_updates tu
-JOIN trips t  ON t.trip_id = tu.trip_id
+FROM rt_trips x
+JOIN trips t  ON t.trip_id = x.trip_id
 JOIN routes r ON r.route_id = t.route_id
-WHERE tu.snapshot_id = %(sid)s AND r.route_short_name = %(route)s AND tu.schedule_relationship = 'CANCELED'
+WHERE x.feed_timestamp = %(ts)s AND r.route_short_name = %(route)s AND x.schedule_relationship = 'CANCELED'
 """
 
 
@@ -229,7 +237,7 @@ def route_delays(conn: psycopg.Connection, route: str, now: datetime, stale_seco
     if snap is None:
         return {"route": route, "realtime": "none", "trips": [], "cancelled_trips": 0}
     age = int((now - snap["feed_timestamp"]).total_seconds())
-    params = {"sid": snap["id"], "route": route}
+    params = {"ts": snap["feed_timestamp"], "route": route}
     trips = conn.execute(ROUTE_DELAYS_SQL, params).fetchall()
     cancelled = conn.execute(ROUTE_CANCELLED_SQL, params).fetchone()["n"]
     delays = [t["delay_s"] for t in trips]
@@ -249,40 +257,25 @@ def route_delays(conn: psycopg.Connection, route: str, now: datetime, stale_seco
     }
 
 
-# ---------- on-time performance ----------
+# ---------- on-time performance (from the daily summary) ----------
 
-# Last reported delay per (trip, service day, stop): the final prediction before the bus got there.
 ON_TIME_SQL = """
-WITH obs AS (
-    SELECT DISTINCT ON (tu.trip_id, tu.start_date, u.stop_sequence)
-           COALESCE(u.arrival_delay, u.departure_delay) AS delay_s,
-           s.feed_timestamp
-    FROM rt_snapshots s
-    JOIN rt_stop_time_updates u ON u.snapshot_id = s.id
-    JOIN rt_trip_updates tu     ON tu.snapshot_id = u.snapshot_id AND tu.entity_id = u.entity_id
-    JOIN trips t                ON t.trip_id = u.trip_id
-    JOIN routes r               ON r.route_id = t.route_id
-    WHERE s.feed_timestamp >= %(since)s
-      AND r.route_short_name = %(route)s
-      AND COALESCE(u.arrival_delay, u.departure_delay) IS NOT NULL
-    ORDER BY tu.trip_id, tu.start_date, u.stop_sequence, s.feed_timestamp DESC
-)
-SELECT count(*) AS observations,
-       count(*) FILTER (WHERE delay_s BETWEEN %(early)s AND %(late)s) AS on_time,
-       count(*) FILTER (WHERE delay_s > %(late)s)  AS late,
-       count(*) FILTER (WHERE delay_s < %(early)s) AS early,
-       round(avg(delay_s)) AS average_delay_seconds,
-       min(feed_timestamp) AS data_from,
-       max(feed_timestamp) AS data_to
-FROM obs
+SELECT COALESCE(sum(observations), 0) AS observations,
+       COALESCE(sum(on_time), 0) AS on_time,
+       COALESCE(sum(late), 0) AS late,
+       COALESCE(sum(early), 0) AS early,
+       sum(total_delay_s) AS total_delay_s,
+       min(service_date) AS data_from,
+       max(service_date) AS data_to,
+       max(updated_at) AS last_updated
+FROM rt_route_daily
+WHERE route_short_name = %(route)s AND service_date > %(today)s::date - %(days)s::int
 """
 
 
-def on_time_performance(conn: psycopg.Connection, route: str, now: datetime, days: int = 7) -> dict:
-    row = conn.execute(
-        ON_TIME_SQL,
-        {"since": now - timedelta(days=days), "route": route, "early": ON_TIME_EARLY_S, "late": ON_TIME_LATE_S},
-    ).fetchone()
+def on_time_performance(conn: psycopg.Connection, route: str, now: datetime, days: int = 7, tz: ZoneInfo | None = None) -> dict:
+    today = now.astimezone(tz).date() if tz else now.date()
+    row = conn.execute(ON_TIME_SQL, {"route": route, "today": today, "days": days}).fetchone()
     n = row["observations"]
     return {
         "route": route,
@@ -292,7 +285,28 @@ def on_time_performance(conn: psycopg.Connection, route: str, now: datetime, day
         "on_time_percent": round(100 * row["on_time"] / n, 1) if n else None,
         "late": row["late"],
         "early": row["early"],
-        "average_delay_seconds": int(row["average_delay_seconds"]) if row["average_delay_seconds"] is not None else None,
+        "average_delay_seconds": round(row["total_delay_s"] / n) if n else None,
         "data_from": row["data_from"].isoformat() if row["data_from"] else None,
         "data_to": row["data_to"].isoformat() if row["data_to"] else None,
+        "summary_updated": row["last_updated"].isoformat() if row["last_updated"] else None,
     }
+
+
+# ---------- monitoring ----------
+
+JOIN_HEALTH_SQL = """
+SELECT count(*) AS rt_trips, count(t.trip_id) AS matched
+FROM rt_trips x
+LEFT JOIN trips t ON t.trip_id = x.trip_id
+WHERE x.feed_timestamp = %(ts)s
+"""
+
+
+def join_health(conn: psycopg.Connection) -> dict | None:
+    """% of realtime trips in the latest snapshot that exist in the static timetable."""
+    snap = latest_snapshot(conn)
+    if snap is None:
+        return None
+    row = conn.execute(JOIN_HEALTH_SQL, {"ts": snap["feed_timestamp"]}).fetchone()
+    pct = round(100 * row["matched"] / row["rt_trips"], 1) if row["rt_trips"] else None
+    return {"rt_trips": row["rt_trips"], "matched": row["matched"], "percent": pct}

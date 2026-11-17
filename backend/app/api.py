@@ -66,6 +66,7 @@ def health(conn: Conn) -> dict:
         "static_feed_version": feed["feed_version"] if feed else None,
         "latest_realtime": snap["feed_timestamp"].isoformat() if snap else None,
         "realtime_age_seconds": int((now_utc() - snap["feed_timestamp"]).total_seconds()) if snap else None,
+        "join_health": db.join_health(conn),
     }
 
 
@@ -117,4 +118,4 @@ def on_time_performance(
     days: Annotated[int, Query(ge=1, le=8)] = 7,
 ) -> dict:
     require_route(conn, route)
-    return db.on_time_performance(conn, route, now_utc(), days=days)
+    return db.on_time_performance(conn, route, now_utc(), days=days, tz=TZ)

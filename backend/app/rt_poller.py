@@ -13,29 +13,20 @@ import logging
 import signal
 import threading
 import time
-from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 import psycopg
-from psycopg import sql
 
 from app.config import Settings
-from app.rt_parser import STOP_COLUMNS, TRIP_COLUMNS, ParsedFeed, parse_feed
+from app.rt_parser import parse_feed
+from app.rt_store import TZ, apply_retention, rollup_recent, store_snapshot  # noqa: F401 (store_snapshot re-exported)
 
 log = logging.getLogger("rt_poller")
 
-INSERT_SNAPSHOT_SQL = """
-    INSERT INTO rt_snapshots (feed_timestamp, trip_update_count, stop_time_update_count)
-    VALUES (%s, %s, %s)
-    ON CONFLICT (feed_timestamp) DO NOTHING
-    RETURNING id
-"""
-
-# ON DELETE CASCADE removes the child rows too
-RETENTION_SQL = "DELETE FROM rt_snapshots WHERE feed_timestamp < now() - make_interval(days => %s)"
-
 RETENTION_EVERY_SECONDS = 3600
+ROLLUP_EVERY_SECONDS = 900  # refresh today's/yesterday's reliability summary every 15 min
 
 
 class FatalConfigError(Exception):
@@ -54,35 +45,6 @@ def fetch_feed(client: httpx.Client, url: str, api_key: str) -> bytes:
         raise FatalConfigError(f"NTA API rejected the key (HTTP {resp.status_code})")
     resp.raise_for_status()  # 429 / 5xx -> httpx.HTTPStatusError -> retried with backoff
     return resp.content
-
-
-def _copy(cur: psycopg.Cursor, table: str, columns: Iterable[str], snapshot_id: int, rows: list[tuple]) -> None:
-    stmt = sql.SQL("COPY {} ({}) FROM STDIN").format(
-        sql.Identifier(table),
-        sql.SQL(", ").join(map(sql.Identifier, ("snapshot_id", *columns))),
-    )
-    with cur.copy(stmt) as copy:
-        for row in rows:
-            copy.write_row((snapshot_id, *row))
-
-
-def store_snapshot(conn: psycopg.Connection, parsed: ParsedFeed) -> int | None:
-    """Store one snapshot atomically. Returns its id, or None if this feed_timestamp already exists."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(INSERT_SNAPSHOT_SQL, (parsed.feed_timestamp, len(parsed.trip_rows), len(parsed.stop_rows)))
-        row = cur.fetchone()
-        if row is None:
-            return None  # the UNIQUE constraint caught a duplicate
-        snapshot_id = row[0]
-        _copy(cur, "rt_trip_updates", TRIP_COLUMNS, snapshot_id, parsed.trip_rows)
-        _copy(cur, "rt_stop_time_updates", STOP_COLUMNS, snapshot_id, parsed.stop_rows)
-        return snapshot_id
-
-
-def apply_retention(conn: psycopg.Connection, days: int) -> int:
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(RETENTION_SQL, (days,))
-        return cur.rowcount
 
 
 def run(settings: Settings, once: bool = False, save_raw: Path | None = None) -> None:
@@ -104,6 +66,7 @@ def run(settings: Settings, once: bool = False, save_raw: Path | None = None) ->
     failures = 0
     last_ts = None
     last_retention: float | None = None
+    last_rollup: float | None = None
     conn: psycopg.Connection | None = None
 
     with httpx.Client(timeout=30.0) as client:
@@ -133,11 +96,16 @@ def run(settings: Settings, once: bool = False, save_raw: Path | None = None) ->
                             (save_raw / name).write_bytes(data)
                     last_ts = parsed.feed_timestamp
 
+                if last_rollup is None or time.monotonic() - last_rollup > ROLLUP_EVERY_SECONDS:
+                    n = rollup_recent(conn, datetime.now(timezone.utc).astimezone(TZ).date())
+                    last_rollup = time.monotonic()
+                    log.info("Rollup: %d route-day summary rows refreshed", n)
+
                 if last_retention is None or time.monotonic() - last_retention > RETENTION_EVERY_SECONDS:
-                    deleted = apply_retention(conn, settings.rt_retention_days)
+                    deleted = apply_retention(conn, settings.rt_retention_days, settings.rt_summary_retention_days)
                     last_retention = time.monotonic()
-                    if deleted:
-                        log.info("Retention: deleted %d snapshots older than %d days", deleted, settings.rt_retention_days)
+                    if any(deleted.values()):
+                        log.info("Retention: deleted %s", deleted)
 
                 failures = 0
                 wait = interval

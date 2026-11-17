@@ -32,3 +32,8 @@ def test_realtime_delays_and_reliability_have_data(client, meta):
     delays = [client.get("/delays", params={"route": r}).json()["trips_reporting"] for r in meta["routes"]]
     otp = [client.get("/on-time-performance", params={"route": r}).json()["observations"] for r in meta["routes"]]
     assert any(delays) and any(otp)
+
+
+def test_health_reports_join_health(client):
+    jh = client.get("/health").json()["join_health"]
+    assert jh is not None and jh["rt_trips"] > 0

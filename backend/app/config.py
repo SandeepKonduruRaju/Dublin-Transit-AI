@@ -21,7 +21,13 @@ class Settings(BaseSettings):
     nta_api_key: str | None = None
     nta_trip_updates_url: str = "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates"
     rt_poll_interval_seconds: int = 60
-    rt_retention_days: int = 8
+    rt_retention_days: int = 2            # detailed latest-delay rows (rt_trips, rt_stop_delays)
+    rt_summary_retention_days: int = 90   # per-route daily reliability summary (tiny)
+
+    # Static timetable refresh (Milestone 6.5)
+    static_gtfs_url: str = "https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip"
+    static_refresh_hour: int = 4          # Dublin local time
+    join_health_min_percent: float = 90.0
 
     # API (Milestone 4)
     timezone: str = "Europe/Dublin"
@@ -34,6 +40,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     llm_model: str = "claude-sonnet-5-5"
     api_base_url: str = "http://localhost:8000"
+
+    # /chat protection (Milestone 6.5)
+    chat_per_ip_per_minute: int = 10
+    chat_per_ip_per_day: int = 100
+    chat_global_per_day: int = 500        # hard cap on LLM spend, whatever the number of IPs
+    trust_proxy_headers: bool = False     # True only behind our own reverse proxy (Milestone 8)
 
     @property
     def database_url(self) -> str:
