@@ -51,14 +51,15 @@ The first sample run caught a real grounding bug: the agent suggested "the 46A" 
 
 ## Storage: before and after
 
+Measured on the Azure VM over **exactly 24 hours of continuous polling** (17 Nov 15:00 to 18 Nov 15:00 UTC, 1,440 polls):
+
 | | Before (append every snapshot) | After (upsert latest + daily rollup) |
 |---|---|---|
-| Growth per poll | ~14 MB per snapshot (every one of ~7,000–24,000 stop updates appended) | Only trip-stops not seen before; repeated predictions overwrite their row |
-| Same 219 polls (16 Nov) | 4.96 M rows appended | **198,118 rows kept (25× fewer)** |
-| Total realtime storage | 2,004 MB for ~30 h of data | 321 MB for 3 service days (laptop, 17 Nov) |
+| Rows written per day | 24.5 M stop rows + 3.35 M trip rows appended | **471 K stop rows + 19 K trip rows kept (52× fewer stop rows)** |
+| Storage per day | ≈ 4.2 GB (those rows × 158 / 177 bytes per row, measured on the old tables) | **311 MB** (`rt_stop_delays` 293 MB, `rt_trips` 17 MB, `rt_route_daily` and `rt_snapshots` 0.3 MB) |
 | Dropping the legacy tables | | freed **2,235 MB** |
 
-Measured MB per day on the always-on VM: a daily cron (`deploy/storage_log.sh`) appends table sizes to `~/storage_log.csv`; the baseline was taken 17 Nov 14:55 UTC.
+The "after" figure is the measured growth of the new tables (`deploy/storage_log.sh`, run daily by cron, appends their sizes to `~/storage_log.csv`). The "before" figure applies the bytes per row measured on the old append-only tables to the rows those tables would have received from the same 1,440 polls. Detailed rows are kept for 2 days, so the new tables should level off rather than keep growing; the daily log will show it. Most of the remaining size is index churn from upserts (see Later in `docs/milestones/M6_5_production_readiness.md`).
 
 ## Run it locally
 
